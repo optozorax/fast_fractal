@@ -44,12 +44,25 @@ async fn main() {
     let poly = vec![(100.0, 100.0).into(), (300.0, 100.0).into(), (300.0, 300.0).into(), (200.0, 400.0).into(), (100.0, 300.0).into()];
 
     let polygons: Vec<Vec<Point>> = vec![poly];
-    // `output` is an arbitrary triangulation of polygons in a format determined by the type parameter (in this case, a `Vec` of triangle fans represented by a `Vec` of the `MyVert` vertices).
     let output = polygons.triangulate::<triangulate::builders::VecVecFanBuilder<_>>(&mut Vec::new()).unwrap().to_vec();
 
+    let sq2 = 1. / 2.0_f32.sqrt();
+    let mat3 = Mat3::from_cols(
+        Vec3::new(sq2, sq2, 0.).normalize(),
+        Vec3::new(-sq2, sq2, 0.).normalize(),
+        Vec3::new(100., 100., 1.),
+    ).inverse();
+    let cols = mat3.to_cols_array();
+    let mat = Mat4::from_cols(
+        Vec4::new(cols[0], cols[1], cols[2], 0.),
+        Vec4::new(cols[3], cols[4], cols[5], 0.),
+        Vec4::new(cols[6], cols[7], cols[8], 0.),
+        Vec4::new(0., 0., 0., 0.),
+    );
+
+    let size = 1000;
+    let sizef = size as f32;
     let render_target = {
-        let size = 1000;
-        let sizef = size as f32;
         let render_target = render_target(size, size);
         render_target.texture.set_filter(FilterMode::Nearest);
 
@@ -82,7 +95,9 @@ async fn main() {
         FRAGMENT_SHADER,
         MaterialParams {
             uniforms: vec![
+                ("_texture_size".to_owned(), UniformType::Float1),
                 ("_resolution".to_owned(), UniformType::Float2),
+                ("_matrix".to_owned(), UniformType::Mat4),
             ],
             textures: vec!["_texture".to_owned()],
             ..Default::default()
@@ -94,10 +109,12 @@ async fn main() {
         clear_background(WHITE);
 
         material.set_uniform("_resolution", (screen_width(), screen_height()));
+        material.set_uniform("_texture_size", sizef);
+        material.set_uniform("_matrix", mat);
         material.set_texture("_texture", render_target.texture);
 
         gl_use_material(material);
-        draw_rectangle(0., 0., screen_width(), screen_height(), WHITE);
+        draw_rectangle(0., 0., screen_width(), screen_height(), LIGHTGRAY);
         gl_use_default_material();
 
         next_frame().await
@@ -110,26 +127,37 @@ varying vec2 uv;
 varying vec2 uv_screen;
 varying vec2 center;
 varying vec2 pixel_size;
+varying vec4 color;
 uniform sampler2D _texture;
+uniform float _texture_size;
 void main() {
-    gl_FragColor = texture2D(_texture, uv);
+    if (uv.x > 0. && uv.y > 0. && uv.x < 1.0 && uv.y < 1.0) {
+        gl_FragColor = texture2D(_texture, uv);
+    } else {
+        gl_FragColor = color;
+    }
 }
 "#;
 
 const VERTEX_SHADER: &str = "#version 100
 attribute vec3 position;
 attribute vec2 texcoord;
+attribute vec4 color0;
 varying lowp vec2 center;
 varying lowp vec2 uv;
 varying lowp vec2 uv_screen;
+varying lowp vec4 color;
+uniform float _texture_size;
 uniform mat4 Model;
 uniform mat4 Projection;
+uniform mat4 _matrix;
 uniform vec2 _resolution;
 void main() {
     float coef = max(_resolution.x, _resolution.y);
     vec4 res = Projection * Model * vec4(position, 1);
-    uv_screen = res.xy / 2.0 + vec2(0.5, 0.5);
-    uv = texcoord * _resolution / coef;
+    // uv_screen = res2.xy / 2.0 + vec2(0.5, 0.5);
+    uv = (_matrix * vec4((texcoord * _texture_size * _resolution / coef).xy, 1.0, 0.)).xy / _texture_size;
+    color = color0 / 255.0;
     gl_Position = res;
 }
 ";
