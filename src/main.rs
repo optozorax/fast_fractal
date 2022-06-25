@@ -1,3 +1,4 @@
+use egui_macroquad::egui;
 use macroquad::prelude::*;
 use triangulate::Triangulate;
 
@@ -27,11 +28,6 @@ impl<'a> From<&'a Vec2> for MyVec<'a> {
 fn to_mat4(mat3: Mat3) -> Mat4 {
     let cols = mat3.to_cols_array();
     Mat4::from_cols(
-        // Vec4::new(cols[0], cols[3], cols[6], 0.),
-        // Vec4::new(cols[1], cols[4], cols[7], 0.),
-        // Vec4::new(cols[2], cols[5], cols[8], 0.),
-        // Vec4::new(0., 0., 0., 0.),
-
         Vec4::new(cols[0], cols[1], cols[2], 0.),
         Vec4::new(cols[3], cols[4], cols[5], 0.),
         Vec4::new(cols[6], cols[7], cols[8], 0.),
@@ -50,7 +46,8 @@ fn edge_mat(poly: &[Vec2], base_index: usize, edge_index: usize) -> Mat3 {
         Vec3::new(b.x - a.x, b.y - a.y, 0.).normalize() * coef,
         Vec3::new(-(b.y - a.y), b.x - a.x, 0.).normalize() * coef,
         Vec3::new(a.x, a.y, 1.),
-    ).inverse()
+    )
+    .inverse()
 }
 
 fn triangulate(poly: &[Vec2]) -> Vec<(Vec2, Vec2, Vec2)> {
@@ -59,11 +56,26 @@ fn triangulate(poly: &[Vec2]) -> Vec<(Vec2, Vec2, Vec2)> {
         .triangulate::<triangulate::builders::VecVecFanBuilder<_>>(&mut Vec::new())
         .unwrap()
         .iter()
-        .map(|x| (x[0].0.to_owned(), x[1].0.to_owned(), x[2].0.to_owned()))
+        .flat_map(|x| {
+            if x.len() == 4 {
+                vec![
+                    (x[0].0.to_owned(), x[1].0.to_owned(), x[2].0.to_owned()),
+                    (x[1].0.to_owned(), x[2].0.to_owned(), x[3].0.to_owned()),
+                ]
+                .into_iter()
+            } else {
+                vec![(x[0].0.to_owned(), x[1].0.to_owned(), x[2].0.to_owned())].into_iter()
+            }
+        })
         .collect()
 }
 
-fn draw_polygon(poly: &[Vec2], mat_poly: Mat3, render_target: &mut macroquad::texture::RenderTarget, render_target_size: f32) {
+fn draw_polygon(
+    poly: &[Vec2],
+    mat_poly: Mat3,
+    render_target: &mut macroquad::texture::RenderTarget,
+    render_target_size: f32,
+) {
     set_camera(&Camera2D {
         zoom: vec2(2. / render_target_size, 2. / render_target_size),
         target: vec2(render_target_size / 2., render_target_size / 2.),
@@ -75,10 +87,10 @@ fn draw_polygon(poly: &[Vec2], mat_poly: Mat3, render_target: &mut macroquad::te
 
     for i in triangulate(poly) {
         draw_triangle(
-            (mat_poly.inverse() * Vec3::new(i.1.x, i.1.y, 1.)).xy(), 
-            (mat_poly.inverse() * Vec3::new(i.0.x, i.0.y, 1.)).xy(), 
-            (mat_poly.inverse() * Vec3::new(i.2.x, i.2.y, 1.)).xy(), 
-            WHITE
+            (mat_poly.inverse() * Vec3::new(i.1.x, i.1.y, 1.)).xy(),
+            (mat_poly.inverse() * Vec3::new(i.0.x, i.0.y, 1.)).xy(),
+            (mat_poly.inverse() * Vec3::new(i.2.x, i.2.y, 1.)).xy(),
+            WHITE,
         );
     }
 
@@ -136,13 +148,46 @@ fn draw_recursive(
     gl_use_material(material);
     draw_rectangle(0., 0., draw_target_size, draw_target_size, WHITE);
     gl_use_default_material();
-    
+
     set_default_camera();
+}
+
+pub fn toggle_ui(ui: &mut egui::Ui, pos: &mut Vec2, coef_x: f32, coef_y: f32) -> bool {
+    let desired_size = ui.spacing().interact_size.y * egui::vec2(1.0, 1.0);
+
+    let rect = egui::Rect::from_min_size(
+        egui::pos2(pos.x * coef_x, pos.y * coef_y) - desired_size / 2.,
+        desired_size,
+    );
+    let mut response = ui.allocate_rect(rect, egui::Sense::drag());
+
+    let mut changed = false;
+    if response.dragged() {
+        ui.output().cursor_icon = egui::CursorIcon::Move;
+        let delta = response.drag_delta();
+        pos.x += delta.x / coef_x;
+        pos.y += delta.y / coef_y;
+        response.mark_changed();
+        changed = true;
+    }
+
+    if ui.is_rect_visible(rect) {
+        let visuals = ui
+            .style()
+            .interact_selectable(&response, response.dragged());
+        let radius = 0.5 * rect.height();
+        let rect = rect.expand(visuals.expansion);
+        let center = egui::pos2(rect.center().x, rect.center().y);
+        ui.painter()
+            .circle(center, 0.75 * radius, visuals.bg_fill, visuals.fg_stroke);
+    }
+
+    changed
 }
 
 #[macroquad::main("Fractal")]
 async fn main() {
-    let poly: Vec<Vec2> = vec![
+    let mut poly: Vec<Vec2> = vec![
         (0.0, 0.0).into(),
         (400.0, 0.0).into(),
         (400.5, 200.5).into(),
@@ -150,11 +195,8 @@ async fn main() {
         (0.0, 200.0).into(),
     ];
 
-    let mat_poly = (Mat3::from_translation(Vec2::new(50., 25.)) ).inverse(); // translation of original polygon
+    let mat_poly = (Mat3::from_translation(Vec2::new(50., 25.))).inverse(); // translation of original polygon
     let mat_fractal = (Mat3::from_translation(Vec2::new(200., 100.))).inverse(); // translation of full fractal
-
-    let mat1 = edge_mat(&poly, 0, 2);
-    let mat2 = edge_mat(&poly, 0, 3);
 
     let size = 1000;
     let sizef = size as f32;
@@ -174,56 +216,79 @@ async fn main() {
     )
     .unwrap();
 
-    let now = std::time::Instant::now();
-
-    let render_target = {
-        let mut render_target = render_target(size, size);
-        render_target.texture.set_filter(FilterMode::Nearest);
-        draw_polygon(&poly, mat_poly, &mut render_target, sizef);
-        render_target
-    };
-
-    println!("ELAPSED on draw polygon: {:?}", now.elapsed());
-    let now = std::time::Instant::now();
-
+    let mut render_target = render_target(size, size);
     let mut screen1 = macroquad::prelude::render_target(size, size);
-    draw_recursive(
-        render_target.texture,
-        mat_poly,
-        render_target.texture,
-        mat_poly,
-        screen1,
-        mat_fractal,
-        sizef,
-        mat1,
-        mat2,
-        material,
-    );
-
-    println!("ELAPSED on first draw: {:?}", now.elapsed());
-    let now = std::time::Instant::now();
-
     let mut screen2 = macroquad::prelude::render_target(size, size);
 
-    for _ in 0..20 {
-        draw_recursive(
-            render_target.texture,
-            mat_poly,
-            screen1.texture,
-            mat_fractal,
-            screen2,
-            mat_fractal,
-            sizef,
-            mat1,
-            mat2,
-            material,
-        );
-        std::mem::swap(&mut screen1, &mut screen2);
-    }
-
-    println!("ELAPSED on full rendering: {:?}", now.elapsed());
+    let mut changed = true;
 
     loop {
+        egui_macroquad::ui(|egui_ctx| {
+            let available_rect = egui_ctx.available_rect();
+            let layer_id = egui::LayerId::background();
+            let id = egui::Id::new("central_panel");
+
+            let clip_rect = egui_ctx.input().screen_rect();
+            let mut panel_ui =
+                egui::Ui::new(egui_ctx.clone(), layer_id, id, available_rect, clip_rect);
+
+            for i in &mut poly {
+                let mut pos = (mat_fractal.inverse() * Vec3::new(i.x, i.y, 1.)).xy();
+                let this_changed = toggle_ui(
+                    &mut panel_ui,
+                    &mut pos,
+                    screen_width() / sizef,
+                    screen_height() / sizef,
+                );
+                changed |= this_changed;
+                if this_changed {
+                    *i = (mat_fractal * Vec3::new(pos.x, pos.y, 1.)).xy();
+                }
+            }
+        });
+
+        if changed {
+            let now = std::time::Instant::now();
+
+            let mat1 = edge_mat(&poly, 0, 2);
+            let mat2 = edge_mat(&poly, 0, 3);
+
+            draw_polygon(&poly, mat_poly, &mut render_target, sizef);
+
+            draw_recursive(
+                render_target.texture,
+                mat_poly,
+                render_target.texture,
+                mat_poly,
+                screen1,
+                mat_fractal,
+                sizef,
+                mat1,
+                mat2,
+                material,
+            );
+
+            for _ in 0..20 {
+                draw_recursive(
+                    render_target.texture,
+                    mat_poly,
+                    screen1.texture,
+                    mat_fractal,
+                    screen2,
+                    mat_fractal,
+                    sizef,
+                    mat1,
+                    mat2,
+                    material,
+                );
+                std::mem::swap(&mut screen1, &mut screen2);
+            }
+
+            println!("ELAPSED on full rendering: {:?}", now.elapsed());
+
+            changed = false;
+        }
+
         draw_texture_ex(
             screen1.texture,
             0.0,
@@ -234,6 +299,8 @@ async fn main() {
                 ..Default::default()
             },
         );
+
+        egui_macroquad::draw();
 
         next_frame().await
     }

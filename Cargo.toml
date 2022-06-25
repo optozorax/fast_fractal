@@ -4,5 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-macroquad = "0.3.20"
+macroquad = "0.3.16"
 triangulate = "0.1.0"
+egui-macroquad = "0.11.0"
