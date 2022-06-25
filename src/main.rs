@@ -1,7 +1,52 @@
+use triangulate::Triangulate;
 use macroquad::prelude::*;
+
+#[derive(Default, Copy, Clone, PartialEq, PartialOrd)]
+pub struct Point {
+    x: f32,
+    y: f32,
+}
+
+impl Point {
+    pub fn new(x: f32, y: f32) -> Self { Point {x, y} }
+}
+
+impl std::fmt::Debug for Point {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "({}, {})", self.x, self.y)
+    }
+}
+
+impl std::fmt::Display for Point {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "({}, {})", self.x, self.y)
+    }
+}
+
+impl triangulate::Vertex for Point {
+    type Coordinate = f32;
+
+    #[inline(always)]
+    fn x(&self) -> Self::Coordinate { self.x }
+
+    #[inline(always)]
+    fn y(&self) -> Self::Coordinate { self.y }
+}
+
+impl Into<Point> for (f32, f32) {
+    fn into(self) -> Point {
+        Point::new(self.0, self.1)
+    }
+}
 
 #[macroquad::main("Fractal")]
 async fn main() {
+    let poly = vec![(100.0, 100.0).into(), (300.0, 100.0).into(), (300.0, 300.0).into(), (200.0, 400.0).into(), (100.0, 300.0).into()];
+
+    let polygons: Vec<Vec<Point>> = vec![poly];
+    // `output` is an arbitrary triangulation of polygons in a format determined by the type parameter (in this case, a `Vec` of triangle fans represented by a `Vec` of the `MyVert` vertices).
+    let output = polygons.triangulate::<triangulate::builders::VecVecFanBuilder<_>>(&mut Vec::new()).unwrap().to_vec();
+
     let render_target = {
         let size = 1000;
         let sizef = size as f32;
@@ -21,6 +66,10 @@ async fn main() {
         for i in (0..count).map(|i| sizef/count as f32 * i as f32) {
             draw_line(0., i, sizef, i, 2.0, BLUE);
             draw_line(i, 0., i, sizef, 2.0, BLUE);
+        }
+
+        for i in output {
+            draw_triangle((i[0].x, i[0].y).into(), (i[1].x, i[1].y).into(), (i[2].x, i[2].y).into(), GREEN)
         }
 
         set_default_camera();
