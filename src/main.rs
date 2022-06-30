@@ -35,19 +35,24 @@ fn to_mat4(mat3: DMat3) -> Mat4 {
     )
 }
 
-// Assumes that poly points defined in clockwise
-fn edge_mat(poly: &[DVec2], base_index: usize, edge_index: usize) -> DMat3 {
-    let len_base = (poly[base_index] - poly[(base_index + 1) % poly.len()]).length();
-    let b = poly[edge_index];
-    let a = poly[(edge_index + 1) % poly.len()];
-    let len_ab = (b - a).length();
-    let coef = len_ab / len_base;
-
-    let x = DVec3::new(b.x - a.x, b.y - a.y, 0.).normalize() * coef;
-    let y = DVec3::new(-(b.y - a.y), b.x - a.x, 0.).normalize() * coef;
+// Return matrix that corresponds to coordinate system, with OX equals to these two points, and OY perpendicular to that, and with O equals to first point
+fn two_point_mat(a: DVec2, b: DVec2) -> DMat3 {
+    let x = DVec3::new(b.x - a.x, b.y - a.y, 0.);
+    let y = DVec3::new(-(b.y - a.y), b.x - a.x, 0.);
     let pos = DVec3::new(a.x, a.y, 1.);
 
-    DMat3::from_cols(x, y, pos).inverse()
+    DMat3::from_cols(x, y, pos)
+}
+
+// Assumes that poly points defined in clockwise
+fn edge_mat(poly: &[DVec2], base_index: usize, edge_index: usize) -> DMat3 {
+    let a_base = poly[base_index];
+    let b_base = poly[(base_index + 1) % poly.len()];
+
+    let a = poly[edge_index];
+    let b = poly[(edge_index + 1) % poly.len()];
+
+    two_point_mat(a_base, b_base) * two_point_mat(b, a).inverse()
 }
 
 fn triangulate(poly: &[DVec2]) -> Vec<(DVec2, DVec2, DVec2)> {
@@ -87,9 +92,13 @@ fn draw_polygon(
 
     for i in triangulate(poly) {
         draw_triangle(
-            (mat_poly.inverse() * DVec3::new(i.1.x, i.1.y, 1.)).xy().as_f32(),
-            (mat_poly.inverse() * DVec3::new(i.0.x, i.0.y, 1.)).xy().as_f32(),
-            (mat_poly.inverse() * DVec3::new(i.2.x, i.2.y, 1.)).xy().as_f32(),
+            (mat_poly.inverse().transform_point2(i.1)).xy().as_f32(),
+            (mat_poly.inverse() * DVec3::new(i.0.x, i.0.y, 1.))
+                .xy()
+                .as_f32(),
+            (mat_poly.inverse() * DVec3::new(i.2.x, i.2.y, 1.))
+                .xy()
+                .as_f32(),
             Color::from_rgba(255, 0, 0, 255),
         );
     }
@@ -195,20 +204,154 @@ pub fn toggle_ui(ui: &mut egui::Ui, pos: &mut DVec2, coef_x: f64, coef_y: f64) -
     changed
 }
 
+#[derive(Debug, Clone)]
+struct BoundingBox {
+    start: DVec2,
+    min: DVec2,
+    max: DVec2,
+}
+
+impl BoundingBox {
+    fn new(point: DVec2) -> Self {
+        Self {
+            start: point,
+            min: Default::default(),
+            max: Default::default(),
+        }
+    }
+
+    fn update(&mut self, mut point: DVec2) {
+        point -= self.start;
+
+        self.min.x = self.min.x.min(point.x);
+        self.min.y = self.min.y.min(point.y);
+
+        self.max.x = self.max.x.max(point.x);
+        self.max.y = self.max.y.max(point.y);
+    }
+
+    // Returns matrix that transforms coordinates inside bounding box into [0; 1]x[0; 1] (preserves aspect ratio)
+    fn transform_mat(&self, sizef: f64, padding_percent: f64) -> DMat3 {
+        let min = self.start + self.min;
+        let max = self.start + self.max;
+        let size = max - min;
+
+        let min = min - padding_percent * size;
+        let max = max + padding_percent * size;
+        let size = max - min;
+
+        let scale = size.x.max(size.y);
+        DMat3::from_translation(min) * DMat3::from_scale(DVec2::new(scale / sizef, scale / sizef))
+    }
+
+    fn unioni(&mut self, other: &BoundingBox) {
+        self.update(other.start + other.min);
+        self.update(other.start + other.max);
+    }
+
+    fn mul(&mut self, mat: DMat3) {
+        self.start = mat.transform_point2(self.start);
+        self.min = mat.transform_vector2(self.min);
+        self.max = mat.transform_vector2(self.max);
+    }
+
+    fn draw(&self, mat: DMat3, color: Color) {
+        let min = self.start + self.min;
+        let max = self.start + self.max;
+
+        let a = mat.transform_point2(min).as_f32();
+        let b = mat.transform_point2(DVec2::new(min.x, max.y)).as_f32();
+        let c = mat.transform_point2(max).as_f32();
+        let d = mat.transform_point2(DVec2::new(max.x, min.y)).as_f32();
+
+        let thicc = 2.0;
+        draw_line(a.x, a.y, b.x, b.y, thicc, color);
+        draw_line(b.x, b.y, c.x, c.y, thicc, color);
+        draw_line(c.x, c.y, d.x, d.y, thicc, color);
+        draw_line(d.x, d.y, a.x, a.y, thicc, color);
+        draw_line(a.x, a.y, c.x, c.y, thicc / 2.0, color);
+    }
+}
+
+const BB_SIZE: usize = 360;
+
+fn get_rot_mat(index: i64) -> DMat3 {
+    DMat3::from_rotation_z((index as f64) / BB_SIZE as f64 * std::f64::consts::TAU)
+}
+
+#[derive(Clone, Debug)]
+struct BoundingBox360(Vec<BoundingBox>);
+
+impl BoundingBox360 {
+    pub fn new(poly: &[DVec2]) -> Self {
+        Self(
+            (0..BB_SIZE)
+                .map(|i| -(i as f64) / BB_SIZE as f64 * std::f64::consts::TAU)
+                .map(|angle| {
+                    let matrix = DMat2::from_angle(angle);
+                    let mut bb = BoundingBox::new(matrix * *poly.first().unwrap());
+                    for i in poly {
+                        bb.update(matrix * *i);
+                    }
+                    bb.start = *poly.first().unwrap();
+                    bb
+                })
+                .collect(),
+        )
+    }
+
+    pub fn mul(&mut self, mat: DMat3) {
+        let axis = DVec2::new(1., 0.);
+        let mat_axis = mat.transform_vector2(axis);
+        let offset = ((std::f64::consts::PI + axis.angle_between(mat_axis)) * BB_SIZE as f64
+            / std::f64::consts::TAU) as usize;
+        let new_vec = (0..BB_SIZE)
+            .map(|i| {
+                let index = (i + offset) % BB_SIZE;
+                let mut res = self.0[index].clone();
+                res.mul(get_rot_mat(-(i as i64)) * mat.inverse() * get_rot_mat(index as i64));
+                res
+            })
+            .collect::<Vec<_>>();
+        self.0 = new_vec;
+    }
+
+    pub fn unioni(&mut self, other: &Self) {
+        for (current, other) in self.0.iter_mut().zip(other.0.iter()) {
+            current.unioni(other);
+        }
+    }
+
+    pub fn draw(&self, mat: DMat3, color: Color) {
+        self.0.first().unwrap().draw(mat, color);
+    }
+
+    pub fn transform_mat(&self, sizef: f64, padding_percent: f64) -> DMat3 {
+        self.0[0].transform_mat(sizef, padding_percent)
+    }
+}
+
 #[macroquad::main("Fractal")]
 async fn main() {
     let mut poly: Vec<DVec2> = vec![
         (0.0, 0.0).into(),
         (400.0, 0.0).into(),
-        (400.5, 200.5).into(),
-        (100.5, 300.5).into(),
-        (0.0, 200.0).into(),
+        (300.0, 300.0).into(),
+        (100.0, 400.0).into(),
+        (0.0, 300.0).into(),
     ];
 
     let scale = 4.;
 
-    let mat_poly = (DMat3::from_scale(DVec2::new(scale, scale)) * DMat3::from_translation(DVec2::new(50., 25.))).inverse(); // translation of original polygon
-    let mat_fractal = (DMat3::from_scale(DVec2::new(scale, scale)) * DMat3::from_translation(DVec2::new(200., 100.))).inverse(); // translation of full fractal
+    let mat_poly = (DMat3::from_scale(DVec2::new(scale, scale))
+        * DMat3::from_translation(DVec2::new(50., 25.)))
+    .inverse(); // translation of original polygon
+    let mat_fractal = (DMat3::from_scale(DVec2::new(scale, scale))
+        * DMat3::from_translation(DVec2::new(200., 100.)))
+    .inverse(); // translation of full fractal
+
+    let mut bb = BoundingBox360::new(&poly);
+    let mut poly_bb = bb.clone();
 
     let size = (1000. * scale) as u32;
     let sizef = size as f32;
@@ -228,6 +371,21 @@ async fn main() {
     )
     .unwrap();
 
+    let material_final = load_material(
+        VERTEX_SHADER_FINAL,
+        FRAGMENT_SHADER_FINAL,
+        MaterialParams {
+            uniforms: vec![
+                ("_texture_size".to_owned(), UniformType::Float1),
+                ("_resolution".to_owned(), UniformType::Float2),
+                ("_matrix".to_owned(), UniformType::Mat4),
+            ],
+            textures: vec!["_texture".to_owned()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
     let mut render_target = render_target(size, size);
     let mut screen1 = macroquad::prelude::render_target(size, size);
     let mut screen2 = macroquad::prelude::render_target(size, size);
@@ -236,12 +394,7 @@ async fn main() {
 
     let mut changed = true;
 
-    // let mut now = std::time::Instant::now();
-
     loop {
-        // println!("{:5.1}FPS", 1000. / (now.elapsed().as_millis()) as f32);
-        // now = std::time::Instant::now();
-
         egui_macroquad::ui(|egui_ctx| {
             let available_rect = egui_ctx.available_rect();
             let layer_id = egui::LayerId::background();
@@ -266,23 +419,38 @@ async fn main() {
             }
         });
 
-
         if changed {
             mat1 = edge_mat(&poly, 0, 2);
             mat2 = edge_mat(&poly, 0, 3);
 
             draw_polygon(&poly, mat_poly, &mut render_target, sizef);
 
+            poly_bb = BoundingBox360::new(&poly);
+
             changed = false;
         }
+
+        let mut bb_arr_full1 = bb.clone();
+        bb_arr_full1.mul(mat1);
+
+        let mut bb_arr_full2 = bb.clone();
+        bb_arr_full2.mul(mat2);
+
+        let mut bb_arr_full3 = poly_bb.clone();
+        bb_arr_full3.unioni(&bb_arr_full1);
+        bb_arr_full3.unioni(&bb_arr_full2);
+
+        std::mem::swap(&mut bb, &mut bb_arr_full3);
+
+        let mat_bb = bb.transform_mat(sizef.into(), 0.05);
 
         draw_recursive(
             render_target.texture,
             mat_poly,
             screen1.texture,
-            mat_fractal,
+            mat_bb,
             screen2,
-            mat_fractal,
+            mat_bb,
             sizef,
             mat1,
             mat2,
@@ -290,16 +458,21 @@ async fn main() {
         );
         std::mem::swap(&mut screen1, &mut screen2);
 
-        draw_texture_ex(
-            screen2.texture,
-            0.0,
-            0.0,
-            WHITE,
-            DrawTextureParams {
-                dest_size: Some(vec2(screen_width(), screen_height())),
-                ..Default::default()
-            },
-        );
+        material_final.set_uniform("_texture_size", sizef);
+        material_final.set_uniform("_resolution", (sizef, sizef));
+        material_final.set_uniform("_matrix", to_mat4(mat_bb.inverse() * mat_fractal));
+        material_final.set_texture("_texture", screen2.texture);
+        gl_use_material(material_final);
+        draw_rectangle(0., 0., screen_width(), screen_height(), WHITE);
+        gl_use_default_material();
+
+        // let bb_draw_mat = DMat3::from_scale(DVec2::new((screen_width()/sizef).into(), (screen_height()/sizef).into())) * mat_fractal.inverse();
+        // bb.draw(bb_draw_mat, BLUE);
+        // bb.0[26].draw(bb_draw_mat, YELLOW);
+        // bb_arr_full1.draw(bb_draw_mat, GREEN);
+        // bb_arr_full2.draw(bb_draw_mat, ORANGE);
+        // bb_arr_full3.draw(bb_draw_mat, LIME);
+        // bb_arr_full4.draw(bb_draw_mat, ORANGE);
 
         egui_macroquad::draw();
 
@@ -308,19 +481,22 @@ async fn main() {
 }
 
 const FRAGMENT_SHADER: &str = r#"#version 100
-precision lowp float;
+precision highp float;
+
 varying vec2 uv;
 varying vec2 uv_screen;
-varying vec2 center;
-varying float pixel_size;
 varying vec4 color;
-uniform sampler2D _texture;
+varying float pixel_size;
+
 uniform float _texture_size;
+uniform sampler2D _texture;
 uniform sampler2D _screen;
+
 void main() {
     vec3 c = texture2D(_screen, uv_screen).xyz;
     if (uv.x > 0. && uv.y > 0. && uv.x < 1.0 && uv.y < 1.0) {
-        int aa_size = 2;
+        /*
+        int aa_size = 1;
         for (int i = 0; i < aa_size; ++i) {
             for (int j = 0; j < aa_size; ++j) {
                 vec2 uv_offset = vec2(float(i), float(j)) / float(aa_size) * pixel_size;
@@ -329,42 +505,98 @@ void main() {
             }
         }
         if (c.x > 1.) {
-            c.y += (c.x - 1.) / 4.;
-            c.x = 1.;
+            c.y += (c.x - 1.) / 16.;
+            c.x = 0.;
         }
         if (c.y > 1.) {
-            c.z += (c.y - 1.) / 4.;
-            c.y = 1.;
+            c.z += (c.y - 1.) / 16.;
+            c.y = 0.;
         }
         if (c.z > 1.) {
             c.z = 1.;
         }
+        */
+        if (texture2D(_texture, uv).x != 0.) { c += color.xyz; }
     }
     gl_FragColor = vec4(c, 1.);
 }
 "#;
 
 const VERTEX_SHADER: &str = "#version 100
+precision highp float;
+
 attribute vec3 position;
 attribute vec2 texcoord;
 attribute vec4 color0;
-varying lowp vec2 center;
-varying lowp vec2 uv;
-varying lowp vec2 uv_screen;
-varying lowp vec4 color;
+
+varying vec2 uv;
+varying vec2 uv_screen;
+varying vec4 color;
 varying float pixel_size;
+
 uniform float _texture_size;
 uniform mat4 Model;
 uniform mat4 Projection;
 uniform mat4 _matrix;
 uniform vec2 _resolution;
+
 void main() {
-    float coef = max(_resolution.x, _resolution.y);
-    pixel_size = 1.0 / coef;
     vec4 res = Projection * Model * vec4(position, 1);
     uv_screen = res.xy / 2.0 + vec2(0.5, 0.5);
+    float coef = max(_resolution.x, _resolution.y);
+    pixel_size = 1.0 / coef;
     uv = (_matrix * vec4((texcoord * _texture_size * _resolution / coef).xy, 1.0, 0.)).xy / _texture_size;
     color = color0 / 255.0;
+    gl_Position = res;
+}
+";
+
+const FRAGMENT_SHADER_FINAL: &str = r#"#version 100
+precision highp float;
+
+varying vec2 uv;
+
+uniform sampler2D _texture;
+
+#define SRGB_TO_LINEAR(c) pow((c), vec3(2.2))
+#define LINEAR_TO_SRGB(c) pow((c), vec3(1.0 / 2.2))
+#define SRGB(r, g, b) SRGB_TO_LINEAR(vec3(float(r), float(g), float(b)) / 255.0)
+
+const vec3 COLOR0 = SRGB(255, 0, 114);
+const vec3 COLOR1 = SRGB(197, 255, 80);
+
+void main() {
+    vec3 c = texture2D(_texture, uv).xyz;
+    float val = (c.x + c.y * 16. + c.z * 16. * 16.) / 16.;
+    vec3 color = LINEAR_TO_SRGB(mix(COLOR0, COLOR1, val));
+    if (val != 0.) {
+        gl_FragColor = vec4(color, 1.);
+    } else {
+        gl_FragColor = vec4(0., 0., 0., 1.);
+    }
+}
+"#;
+
+const VERTEX_SHADER_FINAL: &str = "#version 100
+precision highp float;
+
+attribute vec3 position;
+attribute vec2 texcoord;
+attribute vec4 color0;
+
+varying vec2 uv;
+
+uniform float _texture_size;
+uniform mat4 Model;
+uniform mat4 Projection;
+uniform mat4 _matrix;
+uniform vec2 _resolution;
+
+void main() {
+    vec4 res = Projection * Model * vec4(position, 1);
+    float coef = max(_resolution.x, _resolution.y);
+    // pixel_size = 1.0 / coef;
+    uv = (_matrix * vec4((texcoord * _texture_size * _resolution / coef).xy, 1.0, 0.)).xy / _texture_size;
     gl_Position = res;
 }
 ";
