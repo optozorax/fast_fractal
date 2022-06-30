@@ -361,6 +361,8 @@ async fn main() {
         FRAGMENT_SHADER,
         MaterialParams {
             uniforms: vec![
+                ("_depth1".to_owned(), UniformType::Float1),
+                ("_depth2".to_owned(), UniformType::Float1),
                 ("_texture_size".to_owned(), UniformType::Float1),
                 ("_resolution".to_owned(), UniformType::Float2),
                 ("_matrix".to_owned(), UniformType::Mat4),
@@ -393,6 +395,10 @@ async fn main() {
     let mut mat2 = edge_mat(&poly, 0, 3);
 
     let mut changed = true;
+
+    let mut mat_bb_prev = bb.transform_mat(sizef.into(), 0.05);
+
+    let mut depth = 0;
 
     loop {
         egui_macroquad::ui(|egui_ctx| {
@@ -444,11 +450,13 @@ async fn main() {
 
         let mat_bb = bb.transform_mat(sizef.into(), 0.05);
 
+        material.set_uniform("_depth1", (depth % 256) as f32);
+        material.set_uniform("_depth2", (depth / 256) as f32);
         draw_recursive(
             render_target.texture,
             mat_poly,
             screen1.texture,
-            mat_bb,
+            mat_bb_prev,
             screen2,
             mat_bb,
             sizef,
@@ -460,11 +468,13 @@ async fn main() {
 
         material_final.set_uniform("_texture_size", sizef);
         material_final.set_uniform("_resolution", (sizef, sizef));
-        material_final.set_uniform("_matrix", to_mat4(mat_bb.inverse() * mat_fractal));
+        material_final.set_uniform("_matrix", to_mat4(mat_bb_prev.inverse() * mat_fractal));
         material_final.set_texture("_texture", screen2.texture);
         gl_use_material(material_final);
         draw_rectangle(0., 0., screen_width(), screen_height(), WHITE);
         gl_use_default_material();
+
+        mat_bb_prev = mat_bb;
 
         // let bb_draw_mat = DMat3::from_scale(DVec2::new((screen_width()/sizef).into(), (screen_height()/sizef).into())) * mat_fractal.inverse();
         // bb.draw(bb_draw_mat, BLUE);
@@ -475,6 +485,8 @@ async fn main() {
         // bb_arr_full4.draw(bb_draw_mat, ORANGE);
 
         egui_macroquad::draw();
+
+        depth = (depth + 1) % (256 * 256);
 
         next_frame().await;
     }
@@ -488,6 +500,8 @@ varying vec2 uv_screen;
 varying vec4 color;
 varying float pixel_size;
 
+uniform float _depth1;
+uniform float _depth2;
 uniform float _texture_size;
 uniform sampler2D _texture;
 uniform sampler2D _screen;
@@ -495,28 +509,11 @@ uniform sampler2D _screen;
 void main() {
     vec3 c = texture2D(_screen, uv_screen).xyz;
     if (uv.x > 0. && uv.y > 0. && uv.x < 1.0 && uv.y < 1.0) {
-        /*
-        int aa_size = 1;
-        for (int i = 0; i < aa_size; ++i) {
-            for (int j = 0; j < aa_size; ++j) {
-                vec2 uv_offset = vec2(float(i), float(j)) / float(aa_size) * pixel_size;
-                vec3 getted = texture2D(_texture, uv + uv_offset).xyz;
-                c += getted / float(aa_size * aa_size);
-            }
+        if (texture2D(_texture, uv).z > 0.) { 
+            c = vec3(_depth1 , _depth2, 0.);
+        } else if (texture2D(_texture, uv).x > 0. || texture2D(_texture, uv).y > 0.) { 
+            c = texture2D(_texture, uv).xyz;
         }
-        if (c.x > 1.) {
-            c.y += (c.x - 1.) / 16.;
-            c.x = 0.;
-        }
-        if (c.y > 1.) {
-            c.z += (c.y - 1.) / 16.;
-            c.y = 0.;
-        }
-        if (c.z > 1.) {
-            c.z = 1.;
-        }
-        */
-        if (texture2D(_texture, uv).x != 0.) { c += color.xyz; }
     }
     gl_FragColor = vec4(c, 1.);
 }
@@ -557,23 +554,11 @@ precision highp float;
 varying vec2 uv;
 
 uniform sampler2D _texture;
-
-#define SRGB_TO_LINEAR(c) pow((c), vec3(2.2))
-#define LINEAR_TO_SRGB(c) pow((c), vec3(1.0 / 2.2))
-#define SRGB(r, g, b) SRGB_TO_LINEAR(vec3(float(r), float(g), float(b)) / 255.0)
-
-const vec3 COLOR0 = SRGB(255, 0, 114);
-const vec3 COLOR1 = SRGB(197, 255, 80);
+uniform float _depth;
 
 void main() {
     vec3 c = texture2D(_texture, uv).xyz;
-    float val = (c.x + c.y * 16. + c.z * 16. * 16.) / 16.;
-    vec3 color = LINEAR_TO_SRGB(mix(COLOR0, COLOR1, val));
-    if (val != 0.) {
-        gl_FragColor = vec4(color, 1.);
-    } else {
-        gl_FragColor = vec4(0., 0., 0., 1.);
-    }
+    gl_FragColor = vec4(c, 1.);
 }
 "#;
 
