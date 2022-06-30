@@ -99,7 +99,7 @@ fn draw_polygon(
             (mat_poly.inverse() * DVec3::new(i.2.x, i.2.y, 1.))
                 .xy()
                 .as_f32(),
-            Color::from_rgba(255, 0, 0, 255),
+            Color::from_rgba(1, 0, 255, 255),
         );
     }
 
@@ -199,6 +199,26 @@ pub fn toggle_ui(ui: &mut egui::Ui, pos: &mut DVec2, coef_x: f64, coef_y: f64) -
         let center = egui::pos2(rect.center().x, rect.center().y);
         ui.painter()
             .circle(center, 0.75 * radius, visuals.bg_fill, visuals.fg_stroke);
+    }
+
+    changed
+}
+
+pub fn move_ui(ui: &mut egui::Ui, pos: &mut DVec2, coef_x: f64, coef_y: f64) -> bool {
+    let rect = egui::Rect::from_min_size(
+        egui::pos2(0., 0.),
+        egui::vec2(screen_width(), screen_height()),
+    );
+    let mut response = ui.allocate_rect(rect, egui::Sense::drag());
+
+    let mut changed = false;
+    if response.dragged() {
+        ui.output().cursor_icon = egui::CursorIcon::Move;
+        let delta = response.drag_delta();
+        pos.x += delta.x as f64 / coef_x;
+        pos.y += delta.y as f64 / coef_y;
+        response.mark_changed();
+        changed = true;
     }
 
     changed
@@ -343,26 +363,25 @@ async fn main() {
 
     let scale = 4.;
 
-    let mat_poly = (DMat3::from_scale(DVec2::new(scale, scale))
-        * DMat3::from_translation(DVec2::new(50., 25.)))
-    .inverse(); // translation of original polygon
-    let mat_fractal = (DMat3::from_scale(DVec2::new(scale, scale))
-        * DMat3::from_translation(DVec2::new(200., 100.)))
-    .inverse(); // translation of full fractal
+    let size = (1000. * scale) as u32;
+    let sizef = size as f32;
 
     let mut bb = BoundingBox360::new(&poly);
     let mut poly_bb = bb.clone();
 
-    let size = (1000. * scale) as u32;
-    let sizef = size as f32;
+    let mut mat_poly = poly_bb.transform_mat(sizef.into(), 0.05);
+    //.inverse(); // translation of original polygon
+
+    let mut cam_scale = 1.;
+    let mut cam_offset = DVec2::new(200., 100.) * scale;
+    let mut mat_fractal = DMat3::from_scale(DVec2::new(cam_scale, cam_scale))
+        * DMat3::from_translation(cam_offset).inverse(); // translation of full fractal
 
     let material = load_material(
         VERTEX_SHADER,
         FRAGMENT_SHADER,
         MaterialParams {
             uniforms: vec![
-                ("_depth1".to_owned(), UniformType::Float1),
-                ("_depth2".to_owned(), UniformType::Float1),
                 ("_texture_size".to_owned(), UniformType::Float1),
                 ("_resolution".to_owned(), UniformType::Float2),
                 ("_matrix".to_owned(), UniformType::Mat4),
@@ -398,8 +417,6 @@ async fn main() {
 
     let mut mat_bb_prev = bb.transform_mat(sizef.into(), 0.05);
 
-    let mut depth = 0;
-
     loop {
         egui_macroquad::ui(|egui_ctx| {
             let available_rect = egui_ctx.available_rect();
@@ -423,11 +440,32 @@ async fn main() {
                     *i = (mat_fractal * DVec3::new(pos.x, pos.y, 1.)).xy();
                 }
             }
+
+            if move_ui(
+                &mut panel_ui,
+                &mut cam_offset,
+                (screen_width() / sizef) as f64,
+                (screen_height() / sizef) as f64,
+            ) {
+                mat_fractal = DMat3::from_scale(DVec2::new(cam_scale, cam_scale))
+                    * DMat3::from_translation(cam_offset).inverse();
+            }
+
+            {
+                let wheel = egui_ctx.input().scroll_delta;
+                if wheel.x != 0. {
+                    cam_scale *= 1.05_f64.powf(wheel.x as f64);
+                    mat_fractal = DMat3::from_scale(DVec2::new(cam_scale, cam_scale))
+                        * DMat3::from_translation(cam_offset).inverse();
+                }
+            }
         });
 
         if changed {
             mat1 = edge_mat(&poly, 0, 2);
             mat2 = edge_mat(&poly, 0, 3);
+
+            mat_poly = poly_bb.transform_mat(sizef.into(), 0.05);
 
             draw_polygon(&poly, mat_poly, &mut render_target, sizef);
 
@@ -450,8 +488,6 @@ async fn main() {
 
         let mat_bb = bb.transform_mat(sizef.into(), 0.05);
 
-        material.set_uniform("_depth1", (depth % 256) as f32);
-        material.set_uniform("_depth2", (depth / 256) as f32);
         draw_recursive(
             render_target.texture,
             mat_poly,
@@ -486,8 +522,6 @@ async fn main() {
 
         egui_macroquad::draw();
 
-        depth = (depth + 1) % (256 * 256);
-
         next_frame().await;
     }
 }
@@ -500,8 +534,6 @@ varying vec2 uv_screen;
 varying vec4 color;
 varying float pixel_size;
 
-uniform float _depth1;
-uniform float _depth2;
 uniform float _texture_size;
 uniform sampler2D _texture;
 uniform sampler2D _screen;
@@ -509,10 +541,23 @@ uniform sampler2D _screen;
 void main() {
     vec3 c = texture2D(_screen, uv_screen).xyz;
     if (uv.x > 0. && uv.y > 0. && uv.x < 1.0 && uv.y < 1.0) {
-        if (texture2D(_texture, uv).z > 0.) { 
-            c = vec3(_depth1 , _depth2, 0.);
-        } else if (texture2D(_texture, uv).x > 0. || texture2D(_texture, uv).y > 0.) { 
-            c = texture2D(_texture, uv).xyz;
+        vec3 c1 = texture2D(_texture, uv).xyz;
+        if (c1.z > 0.5) { 
+            c = vec3(1./256. , 0., 0.1);
+        } else if (c1.x > 0. || c1.y > 0.) { 
+            c1.x += 1./256.;
+            if (c1.x >= 1.) {
+                c1.x = 0.;
+                c1.y += 1./256.;
+            }
+            if (c.x > 0. || c.y > 0.) {
+                // if (c1.y > c.y || (c1.y == c.y && c1.x > c.x)) {
+                if (c1.y < c.y || (c1.y == c.y && c1.x < c.x)) {
+                    c = c1;
+                }
+            } else {
+                c = c1;
+            }
         }
     }
     gl_FragColor = vec4(c, 1.);
@@ -554,10 +599,46 @@ precision highp float;
 varying vec2 uv;
 
 uniform sampler2D _texture;
-uniform float _depth;
+
+#define SRGB_TO_LINEAR(c) pow((c), vec3(2.2))
+#define LINEAR_TO_SRGB(c) pow((c), vec3(1.0 / 2.2))
+#define SRGB(r, g, b) SRGB_TO_LINEAR(vec3(float(r), float(g), float(b)) / 255.0)
+
+const vec3 COLOR0 = SRGB(255, 0, 114);
+const vec3 COLOR1 = SRGB(197, 255, 80);
+const vec3 COLOR2 = SRGB(0, 128, 192);
+const vec3 COLOR3 = SRGB(0, 230, 230);
+const vec3 COLOR4 = SRGB(240, 240, 240);
 
 void main() {
     vec3 c = texture2D(_texture, uv).xyz;
+    float depth = (c.x + c.y * 256.) * 256.;
+    if (c.z != 0.) {
+        float step = 6.;
+        c = COLOR0;
+        int j = 1;
+        for (int i = 1; i < 25; i += 1) {
+            if (depth < step * float(i)) {
+                vec3 a = COLOR0;
+                if (j == 1)  a = COLOR0;
+                if (j == 2)  a = COLOR1;
+                if (j == 3)  a = COLOR2;
+                if (j == 4)  a = COLOR3;
+                if (j == 0)  a = COLOR4;
+
+                vec3 b = COLOR1;
+                if (j == 1)  b = COLOR1;
+                if (j == 2)  b = COLOR2;
+                if (j == 3)  b = COLOR3;
+                if (j == 4)  b = COLOR4;
+                if (j == 0)  b = COLOR0;
+                c = LINEAR_TO_SRGB(mix(a, b, clamp((depth - step * float(i - 1)) / step, 0., 1.)));
+                break;
+            }
+            j += 1;
+            if (j == 5) j = 0;
+        }
+    }
     gl_FragColor = vec4(c, 1.);
 }
 "#;
