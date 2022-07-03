@@ -141,6 +141,19 @@ fn draw_polygon(
     }
 }
 
+fn draw_on_target<F: FnMut()>(on: RenderTarget, size: f32, mut f: F) {
+    set_camera(&Camera2D {
+        zoom: vec2(2. / size, 2. / size),
+        target: vec2(size, size) / 2.,
+        render_target: Some(on),
+        ..Default::default()
+    });
+
+    f();
+
+    set_default_camera();
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_recursive(
     polygon_texture: Texture2D,
@@ -150,69 +163,41 @@ fn draw_recursive(
     draw_target: RenderTarget,
     draw_mat: DMat3,
     draw_target_size: f32,
-    mat1: DMat3,
-    mat2: DMat3,
+    mats: &[DMat3],
     material: Material,
-    is_draw_mat1: bool,
-    is_draw_mat2: bool,
+    is_draw_mats: &[bool],
 ) {
-    set_camera(&Camera2D {
-        zoom: vec2(2. / draw_target_size, 2. / draw_target_size),
-        target: vec2(draw_target_size, draw_target_size) / 2.,
-        render_target: Some(draw_target),
-        ..Default::default()
+    draw_on_target(draw_target, draw_target_size, || {
+        clear_background(BLACK);
+
+        material.set_uniform("_resolution", (draw_target_size, draw_target_size));
+        material.set_uniform("_texture_size", draw_target_size);
+        material.set_texture("_screen", draw_target.texture);
+
+        material.set_texture("_texture", polygon_texture);
+        material.set_uniform("_matrix", to_mat4(polygon_mat.inverse() * draw_mat));
+        gl_use_material(material);
+        draw_rectangle(0., 0., draw_target_size, draw_target_size, WHITE);
+        gl_use_default_material();
     });
 
-    clear_background(BLACK);
+    for (is_draw, mat) in is_draw_mats.iter().zip(mats.iter()) {
+        if *is_draw {
+            draw_on_target(draw_target, draw_target_size, || {
+                material.set_texture("_texture", prev_texture);
 
-    material.set_uniform("_resolution", (draw_target_size, draw_target_size));
-    material.set_uniform("_texture_size", draw_target_size);
-    material.set_texture("_screen", draw_target.texture);
+                material.set_uniform("_matrix", to_mat4(prev_mat.inverse() * *mat * draw_mat));
+                gl_use_material(material);
+                draw_rectangle(0., 0., draw_target_size, draw_target_size, WHITE);
+                gl_use_default_material();
 
-    material.set_texture("_texture", polygon_texture);
-    material.set_uniform("_matrix", to_mat4(polygon_mat.inverse() * draw_mat));
-    gl_use_material(material);
-    draw_rectangle(0., 0., draw_target_size, draw_target_size, WHITE);
-    gl_use_default_material();
-
-    set_default_camera();
-
-    if is_draw_mat1 {
-        set_camera(&Camera2D {
-            zoom: vec2(2. / draw_target_size, 2. / draw_target_size),
-            target: vec2(draw_target_size, draw_target_size) / 2.,
-            render_target: Some(draw_target),
-            ..Default::default()
-        });
-        material.set_texture("_texture", prev_texture);
-
-        material.set_uniform("_matrix", to_mat4(prev_mat.inverse() * mat1 * draw_mat));
-        gl_use_material(material);
-        draw_rectangle(0., 0., draw_target_size, draw_target_size, WHITE);
-        gl_use_default_material();
-
-        set_default_camera();
-    }
-
-    if is_draw_mat2 {
-        set_camera(&Camera2D {
-            zoom: vec2(2. / draw_target_size, 2. / draw_target_size),
-            target: vec2(draw_target_size, draw_target_size) / 2.,
-            render_target: Some(draw_target),
-            ..Default::default()
-        });
-        material.set_texture("_texture", prev_texture);
-
-        material.set_uniform("_matrix", to_mat4(prev_mat.inverse() * mat2 * draw_mat));
-        gl_use_material(material);
-        draw_rectangle(0., 0., draw_target_size, draw_target_size, WHITE);
-        gl_use_default_material();
-
-        set_default_camera();
+                set_default_camera();
+            });
+        }
     }
 }
 
-pub fn toggle_ui(ui: &mut egui::Ui, pos: &mut DVec2, coef_x: f64, coef_y: f64) -> bool {
+pub fn point_ui(ui: &mut egui::Ui, pos: &mut DVec2, coef_x: f64, coef_y: f64) -> egui::Response {
     let desired_size = ui.spacing().interact_size.y * egui::vec2(1.0, 1.0);
 
     let rect = egui::Rect::from_min_size(
@@ -221,14 +206,12 @@ pub fn toggle_ui(ui: &mut egui::Ui, pos: &mut DVec2, coef_x: f64, coef_y: f64) -
     );
     let mut response = ui.allocate_rect(rect, egui::Sense::drag());
 
-    let mut changed = false;
     if response.dragged() {
         ui.output().cursor_icon = egui::CursorIcon::Move;
         let delta = response.drag_delta();
         pos.x += delta.x as f64 / coef_x;
         pos.y += delta.y as f64 / coef_y;
         response.mark_changed();
-        changed = true;
     }
 
     if ui.is_rect_visible(rect) {
@@ -242,7 +225,7 @@ pub fn toggle_ui(ui: &mut egui::Ui, pos: &mut DVec2, coef_x: f64, coef_y: f64) -
             .circle(center, 0.75 * radius, visuals.bg_fill, visuals.fg_stroke);
     }
 
-    changed
+    response
 }
 
 pub fn move_ui(ui: &mut egui::Ui, pos: &mut DVec2, coef_x: f64, coef_y: f64) -> bool {
@@ -395,22 +378,20 @@ impl BoundingBox360 {
 #[macroquad::main("Fractal")]
 async fn main() {
     let mut poly: Vec<DVec2> = vec![
-        // (0.0, 0.0).into(),
-        // (400.0, 0.0).into(),
-        // (300.0, 300.0).into(),
-        // (100.0, 400.0).into(),
-        // (0.0, 300.0).into(),
         (0.0, 0.0).into(),
         (200.0, 0.0).into(),
-        (200.0, 200.0).into(),
-        (10.0, 240.0).into(),
-        (0.0, 200.0).into(),
+        (200.0, 150.0).into(),
+        (100.0, 210.0).into(),
+        (0.0, 150.0).into(),
     ];
 
-    let scale = 4.;
+    let mut draw_on: Vec<usize> = vec![2, 3];
+    let mut skip_points: Vec<bool> = Vec::new();
 
-    let size = (1000. * scale) as u32;
-    let sizef = size as f32;
+    let mut texture_size: u32 = 2;
+
+    let mut size = 1000 * texture_size;
+    let mut sizef = size as f32;
 
     let mut bb = BoundingBox360::new(&poly);
     let mut poly_bb = bb.clone();
@@ -420,7 +401,7 @@ async fn main() {
     let mut mat_poly = poly_bb.transform_mat(sizef.into(), padding_percent);
 
     let cam_scale = 0.25;
-    let cam_offset = DVec2::new(200., 100.) * scale;
+    let cam_offset = DVec2::new(200., 100.) * texture_size as f64;
     let mut mat_fractal = DMat3::from_scale(DVec2::new(cam_scale, cam_scale))
         * DMat3::from_translation(cam_offset).inverse(); // translation of full fractal
     let mut mat_fractal_next = mat_fractal;
@@ -463,17 +444,21 @@ async fn main() {
     screen1.texture.set_filter(FilterMode::Nearest);
     screen2.texture.set_filter(FilterMode::Nearest);
 
-    let mut mat1 = edge_mat(&poly, 0, 2);
-    let mut mat2 = edge_mat(&poly, 0, 3);
+    let mut mats: Vec<DMat3> = draw_on.iter().map(|i| edge_mat(&poly, 0, *i)).collect();
 
     let mut changed = true;
     let mut changed2 = false;
+
+    let mut triangulation_succeded = true;
+    let mut sides_too_big = false;
 
     let mut mat_bb_prev = bb.transform_mat(sizef.into(), padding_percent);
 
     let mut old_points;
 
     let mut screen_size;
+
+    let mut draw_bounding_box = false;
 
     loop {
         mat_fractal = mat_fractal_next;
@@ -489,16 +474,27 @@ async fn main() {
             let mut panel_ui =
                 egui::Ui::new(egui_ctx.clone(), layer_id, id, available_rect, clip_rect);
 
-            for i in &mut poly {
+            for (index, i) in poly.iter_mut().enumerate() {
                 let mut pos = (mat_fractal.inverse() * DVec3::new(i.x, i.y, 1.)).xy();
-                let this_changed = toggle_ui(
+                let response = point_ui(
                     &mut panel_ui,
                     &mut pos,
                     (screen_size / sizef) as f64,
                     (screen_size / sizef) as f64,
                 );
-                changed |= this_changed;
-                if this_changed {
+                if response.dragged() {
+                    egui::show_tooltip(egui_ctx, egui::Id::new("my_tooltip"), |ui| {
+                        ui.label(format!("Point #{}", index));
+                        if !triangulation_succeded {
+                            ui.label("ERROR: Triangulation failed");
+                        }
+                        if sides_too_big {
+                            ui.label("ERROR: Sides too big");
+                        }
+                    });
+                }
+                changed |= response.changed();
+                if response.changed() {
                     *i = (mat_fractal * DVec3::new(pos.x, pos.y, 1.)).xy();
                 }
             }
@@ -530,6 +526,129 @@ async fn main() {
                     }
                 }
             }
+
+            egui::Window::new("settings")
+                .default_width(200.0)
+                .show(egui_ctx, |ui| {
+                    ui.label("Polygon:");
+                    ui.horizontal(|ui| {
+                        if ui.button("Add point").clicked() {
+                            let (a, b) = get_line(&poly, poly.len() - 1);
+                            poly.push((b + a) / 2.);
+                            changed = true;
+                        }
+                        if ui
+                            .add_enabled(poly.len() > 3, egui::Button::new("Remove point"))
+                            .clicked()
+                        {
+                            poly.pop();
+                            changed = true;
+                        }
+                    });
+                    ui.separator();
+                    egui::Grid::new("my_grid")
+                        .num_columns(3)
+                        .spacing([40.0, 4.0])
+                        .striped(true)
+                        .show(ui, |ui| {
+                            for (index, i) in poly.iter_mut().enumerate() {
+                                ui.label(format!("{index}"));
+                                changed |=
+                                    ui.add(egui::DragValue::new(&mut i.x).speed(0.1)).changed();
+                                changed |=
+                                    ui.add(egui::DragValue::new(&mut i.y).speed(0.1)).changed();
+                                ui.end_row();
+                            }
+                        });
+                    ui.separator();
+                    {
+                        let mut bool_draw_on = vec![false; poly.len()];
+                        for i in &draw_on {
+                            if bool_draw_on.len() > *i {
+                                bool_draw_on[*i] = true;
+                            }
+                        }
+                        bool_draw_on[0] = false;
+                        ui.horizontal(|ui| {
+                            ui.label("Draw on sides: ");
+                            for (index, b) in bool_draw_on.iter_mut().enumerate().skip(1) {
+                                let old = *b;
+                                let previous = ui.visuals().clone();
+                                let show_error_color = *b && !is_draw_here(&poly, 0, index);
+                                if show_error_color {
+                                    ui.visuals_mut().selection.stroke.color = egui::Color32::RED;
+                                    ui.visuals_mut().widgets.inactive.bg_stroke.color =
+                                        egui::Color32::from_rgb_additive(128, 0, 0);
+                                    ui.visuals_mut().widgets.inactive.bg_stroke.width = 1.0;
+                                    ui.visuals_mut().widgets.hovered.bg_stroke.color =
+                                        egui::Color32::from_rgb_additive(255, 128, 128);
+                                }
+                                ui.toggle_value(b, format!("{index}"));
+                                if show_error_color {
+                                    *ui.visuals_mut() = previous;
+                                }
+                                changed |= old != *b;
+                            }
+                        });
+                        draw_on = bool_draw_on
+                            .into_iter()
+                            .enumerate()
+                            .filter_map(|(index, enabled)| if enabled { Some(index) } else { None })
+                            .collect();
+                    }
+                    ui.separator();
+                    {
+                        skip_points.resize(poly.len(), false);
+                        ui.horizontal(|ui| {
+                            ui.label("Skip points: ");
+                            for (index, b) in skip_points.iter_mut().enumerate() {
+                                let old = *b;
+                                ui.toggle_value(b, format!("{index}"));
+                                changed |= old != *b;
+                            }
+                        });
+                    }
+                    ui.separator();
+                    ui.checkbox(&mut draw_bounding_box, "Draw bounding box");
+                    ui.separator();
+                    if ui.button("Change cam to see full fractal").clicked() {
+                        mat_fractal_next = bb.transform_mat(sizef.into(), 0.03);
+                    }
+                    ui.separator();
+                    ui.label("Texture size: ");
+                    for j in 0..3 {
+                        ui.horizontal(|ui| {
+                            for i in (j * 5 + 1)..((j + 1) * 5 + 1) {
+                                if ui
+                                    .selectable_label(texture_size == i, format!("{:2}k²", i))
+                                    .clicked()
+                                {
+                                    let coef = texture_size as f64 / i as f64;
+                                    mat_fractal_next =
+                                        mat_fractal * DMat3::from_scale(DVec2::new(coef, coef));
+                                    texture_size = i;
+                                    size = texture_size * 1000;
+                                    sizef = size as f32;
+                                    render_target.delete();
+                                    screen1.delete();
+                                    screen2.delete();
+                                    render_target = macroquad::prelude::render_target(size, size);
+                                    screen1 = macroquad::prelude::render_target(size, size);
+                                    screen2 = macroquad::prelude::render_target(size, size);
+                                    render_target.texture.set_filter(FilterMode::Nearest);
+                                    screen1.texture.set_filter(FilterMode::Nearest);
+                                    screen2.texture.set_filter(FilterMode::Nearest);
+                                    draw_on_target(render_target, sizef, || {
+                                        clear_background(BLACK)
+                                    });
+                                    draw_on_target(screen1, sizef, || clear_background(BLACK));
+                                    draw_on_target(screen2, sizef, || clear_background(BLACK));
+                                    changed = true;
+                                }
+                            }
+                        });
+                    }
+                });
         });
 
         if changed {
@@ -538,17 +657,29 @@ async fn main() {
 
         if changed || changed2 {
             if changed2 {
-                mat1 = edge_mat(&poly, 0, 2);
-                mat2 = edge_mat(&poly, 0, 3);
+                mats = draw_on.iter().map(|i| edge_mat(&poly, 0, *i)).collect();
                 changed2 = false;
             } else {
-                mat1 = edge_mat_old(&poly, old_points, 2);
-                mat2 = edge_mat_old(&poly, old_points, 3);
+                mats = draw_on
+                    .iter()
+                    .map(|i| edge_mat_old(&poly, old_points, *i))
+                    .collect();
             }
 
             mat_poly = poly_bb.transform_mat(sizef.into(), padding_percent);
 
-            draw_polygon(&poly, mat_poly, &mut render_target, sizef);
+            let poly_skipped = poly
+                .iter()
+                .zip(skip_points.iter())
+                .filter(|(_, skip)| !**skip)
+                .map(|(point, _)| *point)
+                .collect::<Vec<_>>();
+            triangulation_succeded =
+                draw_polygon(&poly_skipped, mat_poly, &mut render_target, sizef);
+            sides_too_big = !draw_on
+                .iter()
+                .map(|i| is_draw_here(&poly, 0, *i))
+                .all(|i| i);
 
             poly_bb = BoundingBox360::new(&poly);
 
@@ -558,19 +689,15 @@ async fn main() {
             }
         }
 
-        let mut bb_arr_full3 = poly_bb.clone();
-        if is_draw_here(&poly, 0, 2) {
-            let mut bb_arr_full1 = bb.clone();
-            bb_arr_full1.mul(mat1);
-            bb_arr_full3.unioni(&bb_arr_full1);
+        let mut bb_arr_full = poly_bb.clone();
+        for (draw_on_pos, mat) in draw_on.iter().zip(mats.iter()) {
+            if is_draw_here(&poly, 0, *draw_on_pos) {
+                let mut bb_arr_mat = bb.clone();
+                bb_arr_mat.mul(*mat);
+                bb_arr_full.unioni(&bb_arr_mat);
+            }
         }
-        if is_draw_here(&poly, 0, 3) {
-            let mut bb_arr_full2 = bb.clone();
-            bb_arr_full2.mul(mat2);
-            bb_arr_full3.unioni(&bb_arr_full2);
-        }
-
-        std::mem::swap(&mut bb, &mut bb_arr_full3);
+        std::mem::swap(&mut bb, &mut bb_arr_full);
 
         let mat_bb = bb.transform_mat(sizef.into(), padding_percent);
 
@@ -582,11 +709,12 @@ async fn main() {
             screen2,
             mat_bb,
             sizef,
-            mat1,
-            mat2,
+            &mats,
             material,
-            is_draw_here(&poly, 0, 2),
-            is_draw_here(&poly, 0, 3),
+            &draw_on
+                .iter()
+                .map(|i| is_draw_here(&poly, 0, *i))
+                .collect::<Vec<_>>(),
         );
         std::mem::swap(&mut screen1, &mut screen2);
 
@@ -600,11 +728,13 @@ async fn main() {
 
         mat_bb_prev = mat_bb;
 
-        let bb_draw_mat = DMat3::from_scale(DVec2::new(
-            (screen_size / sizef).into(),
-            (screen_size / sizef).into(),
-        )) * mat_fractal.inverse();
-        bb.draw(bb_draw_mat, BLUE);
+        if draw_bounding_box {
+            let bb_draw_mat = DMat3::from_scale(DVec2::new(
+                (screen_size / sizef).into(),
+                (screen_size / sizef).into(),
+            )) * mat_fractal.inverse();
+            bb.draw(bb_draw_mat, BLUE);
+        }
 
         egui_macroquad::draw();
 
@@ -701,33 +831,36 @@ const vec3 COLOR2 = SRGB(0, 128, 192);
 const vec3 COLOR3 = SRGB(0, 230, 230);
 const vec3 COLOR4 = SRGB(240, 240, 240);
 
+float modI(float a, float b) {
+    float m=a-floor((a+0.5)/b)*b;
+    return floor(m+0.5);
+}
+
 void main() {
     vec3 c = texture2D(_texture, uv).xyz;
     float depth = (c.x + c.y * 256.) * 256.;
     if (c.z != 0.) {
         float step = 6.;
         c = COLOR0;
-        int j = 1;
-        for (int i = 1; i < 25; i += 1) {
-            if (depth < step * float(i)) {
-                vec3 a = COLOR0;
-                if (j == 1)  a = COLOR0;
-                if (j == 2)  a = COLOR1;
-                if (j == 3)  a = COLOR2;
-                if (j == 4)  a = COLOR3;
-                if (j == 0)  a = COLOR4;
 
-                vec3 b = COLOR1;
-                if (j == 1)  b = COLOR1;
-                if (j == 2)  b = COLOR2;
-                if (j == 3)  b = COLOR3;
-                if (j == 4)  b = COLOR4;
-                if (j == 0)  b = COLOR0;
-                c = LINEAR_TO_SRGB(mix(a, b, clamp((depth - step * float(i - 1)) / step, 0., 1.)));
-                break;
-            }
-            j += 1;
-            if (j == 5) j = 0;
+        float depthPosStep = floor(depth / step);
+        float i = floor(depth - depthPosStep * step);
+        int j = int(modI(depthPosStep, 5.));
+        {
+            vec3 a = COLOR0;
+            if (j == 0)  a = COLOR0;
+            if (j == 1)  a = COLOR1;
+            if (j == 2)  a = COLOR2;
+            if (j == 3)  a = COLOR3;
+            if (j == 4)  a = COLOR4;
+
+            vec3 b = COLOR1;
+            if (j == 0)  b = COLOR1;
+            if (j == 1)  b = COLOR2;
+            if (j == 2)  b = COLOR3;
+            if (j == 3)  b = COLOR4;
+            if (j == 4)  b = COLOR0;
+            c = LINEAR_TO_SRGB(mix(a, b, clamp(float(i) / step, 0., 1.)));
         }
     }
     gl_FragColor = vec4(c, 1.);
