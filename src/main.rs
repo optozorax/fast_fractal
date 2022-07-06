@@ -116,6 +116,22 @@ fn draw_on_target<Res, F: FnMut() -> Res>(on: RenderTarget, size: f32, mut f: F)
     res
 }
 
+fn draw_on_target_tmp<Res, F: FnMut() -> Res>(on: RenderTarget, size: f32, tmp: RenderTarget, f: F) -> Res {
+    draw_on_target(tmp, size, || {
+        clear_background(BLACK);
+        draw_texture_ex(
+            on.texture,
+            0.,0.,
+            WHITE,
+            DrawTextureParams {
+                dest_size: Some(vec2(size, size)),
+                ..Default::default()
+            },
+        );
+    });
+    draw_on_target(on, size, f)
+}
+
 fn draw_polygon(
     poly: &[DVec2],
     mat_poly: DMat3,
@@ -174,13 +190,15 @@ fn draw_recursive(
     mats: &[DMat3],
     material: Material,
     is_draw_mats: &[bool],
+    tmp: RenderTarget,
 ) {
-    draw_on_target(draw_target, draw_target_size, || {
+    draw_on_target(draw_target, draw_target_size, || clear_background(BLACK));
+    draw_on_target_tmp(draw_target, draw_target_size, tmp, || {
         clear_background(BLACK);
 
         material.set_uniform("_resolution", (draw_target_size, draw_target_size));
         material.set_uniform("_texture_size", draw_target_size);
-        material.set_texture("_screen", draw_target.texture);
+        material.set_texture("_screen", tmp.texture);
         material.set_uniform("_draw_polygon", true as i32);
 
         material.set_texture("_texture", polygon_texture);
@@ -194,9 +212,10 @@ fn draw_recursive(
 
     for (is_draw, mat) in is_draw_mats.iter().zip(mats.iter()) {
         if *is_draw {
-            draw_on_target(draw_target, draw_target_size, || {
+            draw_on_target_tmp(draw_target, draw_target_size, tmp, || {
                 material.set_uniform("_draw_polygon", false as i32);
                 material.set_texture("_texture", prev_texture);
+                material.set_texture("_screen", tmp.texture);
 
                 material.set_uniform("_matrix", to_mat4(prev_mat.inverse() * *mat * draw_mat));
                 gl_use_material(material);
@@ -415,7 +434,7 @@ impl Default for UserState {
             draw_pythagoras_tree: true,
             pythagoras_size: 4,
             pythagoras_draw_on: 2,
-            pythagoras_angle: 6.,
+            pythagoras_angle: 45.,
 
             poly: vec![
                 (0.0, 0.0).into(),
@@ -487,10 +506,12 @@ async fn main() {
     let mut render_target = macroquad::prelude::render_target(size, size);
     let mut screen1 = macroquad::prelude::render_target(size, size);
     let mut screen2 = macroquad::prelude::render_target(size, size);
+    let mut tmp = macroquad::prelude::render_target(size, size);
 
     render_target.texture.set_filter(FilterMode::Nearest);
     screen1.texture.set_filter(FilterMode::Nearest);
     screen2.texture.set_filter(FilterMode::Nearest);
+    tmp.texture.set_filter(FilterMode::Nearest);
 
     let mut mats: Vec<DMat3> = user_state
         .draw_on
@@ -583,7 +604,7 @@ async fn main() {
                 }
             }
 
-            egui::Window::new("settings 4")
+            egui::Window::new("settings")
                 .default_width(200.0)
                 .show(egui_ctx, |ui| {
                     changed |= ui
@@ -735,17 +756,21 @@ async fn main() {
                                     render_target.delete();
                                     screen1.delete();
                                     screen2.delete();
+                                    tmp.delete();
                                     render_target = macroquad::prelude::render_target(size, size);
                                     screen1 = macroquad::prelude::render_target(size, size);
                                     screen2 = macroquad::prelude::render_target(size, size);
+                                    tmp = macroquad::prelude::render_target(size, size);
                                     render_target.texture.set_filter(FilterMode::Nearest);
                                     screen1.texture.set_filter(FilterMode::Nearest);
                                     screen2.texture.set_filter(FilterMode::Nearest);
+                                    tmp.texture.set_filter(FilterMode::Nearest);
                                     draw_on_target(render_target, sizef, || {
                                         clear_background(BLACK)
                                     });
                                     draw_on_target(screen1, sizef, || clear_background(BLACK));
                                     draw_on_target(screen2, sizef, || clear_background(BLACK));
+                                    draw_on_target(tmp, sizef, || clear_background(BLACK));
                                     changed = true;
                                 }
                             }
@@ -902,6 +927,7 @@ async fn main() {
                 .iter()
                 .map(|i| is_draw_here(&user_state.poly, 0, *i))
                 .collect::<Vec<_>>(),
+            tmp,
         );
         std::mem::swap(&mut screen1, &mut screen2);
 
@@ -923,7 +949,7 @@ async fn main() {
                 (screen_size / sizef).into(),
                 (screen_size / sizef).into(),
             )) * user_state.mat_fractal.inverse();
-            bb.draw(bb_draw_mat, BLUE);
+            bb_arr_full.draw(bb_draw_mat, BLUE);
         }
 
         egui_macroquad::draw();
@@ -991,7 +1017,6 @@ attribute vec4 color0;
 
 varying vec2 uv;
 varying vec2 uv_screen;
-// varying float matrix_size;
 varying float pixel_size;
 
 uniform float _texture_size;
